@@ -2,10 +2,10 @@ from gmail_corpus.nltk_util.bigram_score import make_score_dict, save_score_dict
 from nltk.corpus import TaggedCorpusReader
 import numpy as np
 from glob import glob
-import os
+import os, sys
 
 if __name__ == '__main__':
-	corpus_path = '/tmp/tmpLW8UfD'
+	corpus_path = sys.argv[1]
 	# remove empty files
 	files = glob('%s/*.txt' % corpus_path)
 	for f in files:

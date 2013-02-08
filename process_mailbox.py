@@ -7,20 +7,32 @@ import sys
 import string
 from multiprocessing import Pool
 from gmail_corpus.nltk_util.annotate_utils import tag_words_string
-import imaplib, getpass
+import imaplib, getpass, email, email.utils
 from optparse import OptionParser
 from BeautifulSoup import BeautifulStoneSoup, BeautifulSoup
-from pprint import pprint as pp
 import re
+
 line_ending = '\r\n'
-html_expr = re.compile('<[^<]+?>') #('', text)
+html_expr = re.compile('<[^<]+?>')
 line_expr = re.compile('=%s' % line_ending)
+mime_expr = re.compile('=[A-Z0-9]{2}')
 
 from gmail_corpus.nltk_util.bigram_score import make_score_dict
 import tempfile, os
 
+from threading import Thread
+from functools import wraps
+
+def thread(func):
+        @wraps(func)
+        def wrap(*args, **kwargs):
+                t = Thread(target=func, args=args, kwargs=kwargs)
+                t.start()
+                return t        
+        return wrap
+
+
 def format_html(text):
-	# print [ord(l) for l in unicode(text[780:790])]
 	return BeautifulSoup(unicode(text, errors='replace'), convertEntities=BeautifulSoup.ALL_ENTITIES).prettify()
 
 filtered_starts = [
@@ -44,6 +56,7 @@ def fix_line_endings(text):
 def format_message(text):
 	text = unbreak_lines(text)
 	text = fix_line_endings(text)
+	text = mime_expr.sub('', text)
 	text = format_html(text)
 	text = html_expr.sub('', text)
 	
@@ -59,16 +72,38 @@ def tokenize(text):
 	return words
 
 def process_one_message(message):
-	message = format_message(message)
-	tokens = tokenize(message)
+	payload = email.message_from_string(message).get_payload()
+	if isinstance(payload, str):
+		message_text = payload
+	else:
+		bp = get_best_payload(payload)
+		if bp is not None:
+			message_text = bp.as_string()
+		else:
+			message_text = ''
+	message_text = format_message(message_text)
+	# return message_text
+	tokens = [tok for tok in tokenize(message_text) if len(tok) < 40]
 	tagged = nltk.pos_tag(tokens)
 	return tagged
+
+CONTENT_TYPES = {
+	'text/plain':				0,
+	'text/html' :				1,
+	'multipart/alternative':	2
+}
+
+def get_best_payload(payloads):
+	payloads = sorted([p for p in payloads if p.get_content_type() in CONTENT_TYPES], key=lambda x: CONTENT_TYPES[x.get_content_type()])
+	if len(payloads) > 0:
+		return payloads[0]
+	return None
+
 
 class MailboxProcessor(object):
 	def __init__(self, options):
 		creds = (options.username, options.password)
 		iamp_args = (options.server, 993)
-
 
 		if options.ssl:
 			self.conn = imaplib.IMAP4_SSL(*iamp_args)
@@ -82,16 +117,15 @@ class MailboxProcessor(object):
 			sys.exit(1)
 
 		msg_ids = self.list_messages(options.mailbox)
-		# p = Pool(8)
 		tmpdir = tempfile.mkdtemp()
+
 		print 'Writing messages to ', tmpdir
 		for msg_id in msg_ids:
 			print 'Message ', msg_id
 			message = self.get_message(msg_id)
-			# p.apply_async(process_one_message, [message])
 			tagged = process_one_message(message)
-			self.write_msg(tagged, tmpdir)
-
+			if len(tagged) > 0:
+				self.write_msg(tagged, tmpdir)
 		print 'Wrote messages to ', tmpdir
 
 		# score_dict = make_score_dict(text)
@@ -102,8 +136,8 @@ class MailboxProcessor(object):
 		return data[0].split()
 
 	def get_message(self, num):
-		# typ, data = self.conn.fetch(num, '(RFC822)')
-		typ, data = self.conn.fetch(num, '(UID BODY[TEXT])')
+		typ, data = self.conn.fetch(num, '(RFC822)')
+		# typ, data = self.conn.fetch(num, '(UID BODY[TEXT])')
 		return data[0][1]
 
 	def write_msg(self, msg, tmpdir):
